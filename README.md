@@ -3,7 +3,6 @@
 ---
 
 **Willkommen in meinem  GitHub-Repository für NinjaOne.**
-Hier sammle ich PowerShell- und Bash-Snippets, die typische Routine­aufgaben auf Windows Agenten vereinfachen: von System-Inventarisierung über Patch-Workarounds bis hin zu Netz­werk- und Sicherheits­einstellungen.
 
 ---
 
