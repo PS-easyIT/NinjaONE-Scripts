@@ -1,4 +1,4 @@
-# NinjaOne / NinjaRMM Script-Collection ⚙️
+# NinjaOne Script-Collection ⚙️
 
 ---
 
