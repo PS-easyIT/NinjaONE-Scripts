@@ -41,6 +41,13 @@ param(
 $ErrorActionPreference = "Continue"
 $VerbosePreference = "Continue"
 
+# Optional Logging aktivieren - im gleichen Verzeichnis wie das Set-Skript
+$logDir = "$env:ProgramData\NinjaRMMAgent\Logs"
+$logPath = "$logDir\DNSClient_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date)
+# Logs-Verzeichnis erstellen, falls nicht vorhanden
+New-Item -ItemType Directory -Path $logDir -EA Ignore | Out-Null
+Start-Transcript -Path $logPath -ErrorAction SilentlyContinue
+
 # Modulprüfung und Fallback vorbereiten
 if (-not (Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue)) {
     Write-Verbose "Cmdlet Get-DnsClientServerAddress nicht verfügbar - WMI-Fallback wird verwendet."
@@ -58,9 +65,9 @@ function Format-Output {
         [string]$Content
     )
     
-    Write-Output "\n==== $Title ====\n"
+    Write-Output "`n==== $Title ====`n"
     Write-Output "$Content"
-    Write-Output "=====================\n"
+    Write-Output "`n=====================`n"
 }
 #endregion
 
@@ -78,8 +85,8 @@ function Get-DnsInfoModern {
         # Filter für virtuelle und spezielle Interfaces
         $networkAdapters = Get-NetAdapter | Where-Object { 
             ($_.Status -in @('Up','Unknown') -or $_.LinkSpeed -gt 0) -and 
-            # VMware, HyperV, VPN und Loopback ausfiltern
-            $_.InterfaceDescription -notmatch 'VMware|Hyper-V|VPN|loopback|Loopback|Tunnel|TAP|Microsoft Wi-Fi Direct|WAN Miniport'
+            # Erweiterte Blacklist für virtuelle, Container und spezielle Adapter
+            $_.InterfaceDescription -notmatch 'VMware|Hyper-V|vEthernet|WSL|Docker|VPN|loopback|Loopback|Tunnel|TAP|Wi-Fi Direct|WAN Miniport|Bluetooth'
         }
         $dnsReport = @()
         
@@ -334,13 +341,20 @@ foreach ($adapter in $dnsReport) {
     }
 }
 
+
+# DNS-Mismatch-Warnung in den Bericht aufnehmen, wenn gefunden
+if ($hasDnsMismatch) {
+    [void]$reportOutput.AppendLine("`n## Warnungen")
+    [void]$reportOutput.AppendLine("Warnung: Unterschiedliche DNS-Server zwischen Adaptern erkannt!")
+    [void]$reportOutput.AppendLine("Dies kann zu Netzwerkproblemen und inkonsistentem Verhalten führen.")
+}
+
 # DNS Mismatch-Erkennung: Prüfen, ob verschiedene DNS-Server bei aktiven Adaptern vorhanden sind
 $hasDnsMismatch = $false
 
 # Nur prüfen wenn mindestens zwei Adapter mit DNS-Servern vorhanden sind
 if ($adapterDnsServers.Keys.Count -gt 1) {
     $firstDnsServer = $null
-    $mismatchFound = $false
     
     # Den ersten DNS-Server als Referenz nehmen
     foreach ($adapter in $adapterDnsServers.Keys) {
@@ -366,18 +380,16 @@ Format-Output -Title "DNS-Zusammenfassung" -Content $summaryOutput.ToString()
 if (-not $NoCSV) {
     try {
         # Verzeichnis für Berichte erstellen, falls nicht vorhanden
-        $reportDir = "C:\ProgramData\NinjaRMMAgent\Scripts\Reports"
-        if (-not (Test-Path -Path $reportDir)) {
-            New-Item -Path $reportDir -ItemType Directory -Force | Out-Null
-        }
+        $reportDir = Join-Path $logDir 'Reports'
+        New-Item -Path $reportDir -ItemType Directory -EA Ignore | Out-Null
         
         # Log-Rotation: Alte Berichte löschen (nach LogRetentionDays)
         if ($LogRetentionDays -gt 0) {
-            $oldReports = Get-ChildItem -Path $reportDir -Filter "DNS_Report_*.csv" |
+            $oldReports = Get-ChildItem -Path $reportDir -Filter 'DNS_Report_*.csv' |
                           Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$LogRetentionDays) }
             
-            if ($oldReports.Count -gt 0) {
-                Write-Output "$($oldReports.Count) alte Berichte werden gelöscht (>älter als $LogRetentionDays Tage)"
+            if ($oldReports -and $oldReports.Count -gt 0) {
+                Write-Output "$($oldReports.Count) alte Berichte werden gelöscht (älter als $LogRetentionDays Tage)"
                 $oldReports | Remove-Item -Force -ErrorAction SilentlyContinue
             }
         }
@@ -411,7 +423,7 @@ if (-not $NoCSV) {
         
         # Temporäre Datei für Ninja-Anhang erstellen (mit Zeitstempel gegen Namenskonflikte)
         $tempCsvPath = Join-Path $env:TEMP "DNSReport_${hostname}_${timestamp}.csv"
-        $dnsReport | Export-Csv -Path $tempCsvPath -NoTypeInformation -Encoding UTF8 -Force
+        $csvData | Export-Csv -Path $tempCsvPath -NoTypeInformation -Encoding UTF8 -Force
         Write-Output "SCRIPT_FILE:$tempCsvPath"  # <- Ninja erkennt das Präfix und hängt die Datei an
     }
     catch {
@@ -440,17 +452,26 @@ if (-not $NoCustomField) {
             $fieldValue = $fieldValue.Substring(0, 1850) + " [...gekürzt, siehe CSV-Report]"
         }
         
-        # DNS Summary - Variante 1 – Ninja-Property-Set (empfohlen ab Agent 5.3)
-        Ninja-Property-Set DNS_Summary "$fieldValue"
-        
-        # DNS_Mismatch boolean Custom Field setzen (als String 'true' oder 'false')
-        Ninja-Property-Set DNS_Mismatch ($hasDnsMismatch.ToString().ToLower())
-
-        # Variante 2 – CLI (Fallback für ältere Agenten < 5.3)
-        $cli = 'C:\ProgramData\NinjaRMMAgent\ninjarmm-cli.exe'
-        if (Test-Path -Path $cli) {
-            & $cli set DNS_Summary "$fieldValue"
-            & $cli set DNS_Mismatch "$($hasDnsMismatch.ToString().ToLower())"
+        # Prüfen, ob Ninja-Property-Set verfügbar ist
+        if (Get-Command Ninja-Property-Set -EA SilentlyContinue) {
+            # DNS Summary aktualisieren
+            Ninja-Property-Set DNS_Summary "$fieldValue"
+            
+            # DNS_Mismatch boolean Custom Field setzen (als String 'true' oder 'false')
+            Ninja-Property-Set DNS_Mismatch ($hasDnsMismatch.ToString().ToLower())
+            
+            Write-Verbose "Property-Cmdlet erfolgreich verwendet"
+        } else {
+            # Fallback: CLI verwenden wenn Property-Cmdlet nicht verfügbar
+            Write-Verbose "Property-Cmdlet nicht vorhanden – CLI-Fallback"
+            $cli = 'C:\ProgramData\NinjaRMMAgent\ninjarmm-cli.exe'
+            if (Test-Path -Path $cli) {
+                & $cli set DNS_Summary "$fieldValue"
+                & $cli set DNS_Mismatch "$($hasDnsMismatch.ToString().ToLower())"
+                Write-Verbose "CLI-Fallback erfolgreich verwendet"
+            } else {
+                Write-Warning "Weder Property-Cmdlet noch CLI verfügbar - Custom Fields konnten nicht aktualisiert werden"
+            }
         }
         
         Write-Output "Custom Field 'DNS_Summary' aktualisiert"
@@ -462,12 +483,13 @@ if (-not $NoCustomField) {
 else {
     Write-Output "Custom-Field-Update übersprungen (Parameter -NoCustomField aktiviert)"
 }
+
+# Transcript beenden
+Stop-Transcript -ErrorAction SilentlyContinue
 #endregion
 
 #region Abschluss
-
-# Erfolgreichen Abschluss melden
 Write-Verbose "Skriptausführung erfolgreich abgeschlossen."
-Write-Host "DNS-Bericht erfolgreich erstellt." # Kosmetische Ausgabe für Activities-Log
-exit 0 # Erfolg signalisieren
+Write-Host "DNS-Bericht erfolgreich erstellt." 
+exit 0 
 #endregion
