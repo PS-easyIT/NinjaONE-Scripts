@@ -1,4 +1,4 @@
-### NinjaOne does not provide (at least as of spring 2025) any "ready-made" report that collects all DNS servers configured on endpoints across systems and displays them in a dashboard/report.
+### NinjaOne does not provide (spring 2025) any "ready-made" report that collects all DNS servers configured on endpoints across systems and displays them in a dashboard/report.
 
 
 **NinjaOne Integration Guide**
