@@ -2,7 +2,7 @@
 
 ---
 
-** NinjaOne Integration Guide: **
+**NinjaOne Integration Guide: **
 * https://github.com/PS-easyIT/NinjaONE-Scripts/blob/main/05%20-%20DNS%20Settings/NinjaRMM-Guide_ENG.md
 
 ---
