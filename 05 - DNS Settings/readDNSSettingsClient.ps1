@@ -342,13 +342,6 @@ foreach ($adapter in $dnsReport) {
 }
 
 
-# DNS-Mismatch-Warnung in den Bericht aufnehmen, wenn gefunden
-if ($hasDnsMismatch) {
-    [void]$reportOutput.AppendLine("`n## Warnungen")
-    [void]$reportOutput.AppendLine("Warnung: Unterschiedliche DNS-Server zwischen Adaptern erkannt!")
-    [void]$reportOutput.AppendLine("Dies kann zu Netzwerkproblemen und inkonsistentem Verhalten führen.")
-}
-
 # DNS Mismatch-Erkennung: Prüfen, ob verschiedene DNS-Server bei aktiven Adaptern vorhanden sind
 $hasDnsMismatch = $false
 
@@ -369,6 +362,13 @@ if ($adapterDnsServers.Keys.Count -gt 1) {
             }
         }
     }
+}
+
+# DNS-Mismatch-Warnung in den Bericht aufnehmen, wenn gefunden
+if ($hasDnsMismatch) {
+    [void]$reportOutput.AppendLine("`n## Warnungen")
+    [void]$reportOutput.AppendLine("Warnung: Unterschiedliche DNS-Server zwischen Adaptern erkannt!")
+    [void]$reportOutput.AppendLine("Dies kann zu Netzwerkproblemen und inkonsistentem Verhalten führen.")
 }
 
 # Ausgabe der Zusammenfassung
