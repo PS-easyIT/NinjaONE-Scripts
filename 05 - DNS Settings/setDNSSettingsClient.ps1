@@ -1,61 +1,30 @@
 <#
 .SYNOPSIS
-    Setzt (oder entfernt) statische DNS-Server **ausschließlich** auf dem/den
-    produktiven Adapter(n) – d. h.:
+    Setzt oder entfernt statische IPv4-DNS-Server nur auf produktiven Netzwerk­adaptern.
 
-    • Adapter hat ein Default-Gateway **oder**  
-    • Adapter liegt in einem vom Benutzer übergebenen IPv4-Subnetz  
-      (Parameter -TargetSubnet) **oder**  
-    • Adapter hat ein explizit angegebenes Gateway (Parameter -TargetGateway)
+    Ein Adapter ist „produktiv“, wenn  
+      • ein Default-Gateway vorhanden ist **oder**  
+      • seine IPv4-Adresse im -TargetSubnet liegt **oder**  
+      • sein Gateway der -TargetGateway-Adresse entspricht.
 
 .DESCRIPTION
-    • Entwickelt für NinjaOne (NinjaRMM) – läuft als SYSTEM.  
-    • Unterstützt Windows 10/11, Server 2012 R2 +.  
-    • Berücksichtigt ausschließlich physische LAN- und WLAN-Adapter.  
-    • Virtuelle, VPN-, Loopback-, Tunnel- und Wi-Fi-Direct-Interfaces werden
-      ausgefiltert.  
-    • DNS wird per Set-DnsClientServerAddress gesetzt; Fallback auf netsh, wenn nötig.  
-    • Ändert *nur* Adapter, die die Kriterien oben erfüllen.  
-    • Schreibt ein detailliertes Änderungsprotokoll (StdOut) und aktualisiert
-      optional das Custom-Field **DNS_LastChange**.
+    • Ausgeführt als SYSTEM unter NinjaOne / NinjaRMM  
+    • Windows 10/11 und Server 2012 R2 +  
+    • Nur physische LAN/WLAN-Adapter – virtuelle, VPN, Loopback, Tunnel, Wi-Fi-Direct u.a. werden ignoriert  
+    • `Set-DnsClientServerAddress`, Fallback `netsh` für Legacy-OS  
+    • Aktualisiert optional das Custom-Field **DNS_LastChange**
 
-.PARAMETER PrimaryDNS
-    Neuer primärer DNS-Server (IPv4). Pflicht, sofern -ResetDHCP nicht verwendet wird.
+.PARAMETERS
+    -PrimaryDNS      (IPv4, Pflicht wenn -kein ResetDHCP)
+    -SecondaryDNS    (IPv4, optional)
+    -TargetSubnet    (CIDR, z. B. 192.168.10.0/24)
+    -TargetGateway   (IPv4 Gateway)
+    -AdapterName     (Alias/Wildcards, z. B. "Ethernet*")
+    -ResetDHCP       (schaltet DNS auf DHCP)
+    -NoCustomField   (verhindert Custom-Field-Update)
 
-.PARAMETER SecondaryDNS
-    Optionaler zweiter DNS-Server (IPv4).
-
-.PARAMETER TargetSubnet
-    IPv4-Subnetz in CIDR-Notation (z. B. 192.168.10.0/24).  
-    Wird angegeben, werden nur Adapter berücksichtigt, deren IPv4-Adresse
-    innerhalb dieses Netzes liegt.
-
-.PARAMETER TargetGateway
-    Explizite Gateway-Adresse (z. B. 192.168.10.1).  
-    Wird angegeben, werden nur Adapter berücksichtigt, deren Default-Gateway
-    exakt dieser Adresse entspricht.
-
-.PARAMETER AdapterName
-    Optionale Liste von Adapter-Aliasen (Supports Wildcards: „Ethernet*“).
-
-.PARAMETER ResetDHCP
-    Entfernt statische DNS-Einträge und schaltet DNS auf DHCP zurück.
-
-.PARAMETER NoCustomField
-    Unterdrückt das Update des Custom-Fields „DNS_LastChange“.
-
-.EXAMPLE
-    .\setDNSSettings.ps1 -PrimaryDNS 10.0.0.10 -SecondaryDNS 10.0.0.11 `
-        -TargetSubnet 10.0.0.0/23 -Verbose
-
-.EXAMPLE
-    .\setDNSSettings.ps1 -ResetDHCP -TargetGateway 192.168.178.1
-
-.NOTES
-    Datei    : setDNSSettings.ps1
-    Autor:     Andreas Hepp
-    Update:    28.05.2025
-    Version:   1.2
+.EXITCODES
+    0 = geändert 1 = Fehler 2 = nichts zu tun 3 = DNS geändert, Custom-Field fehlgeschlagen
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -93,10 +62,24 @@ function Get-NinjaCustomField {
     
     $value = $null
     
+    # Überprüfen, ob die Ninja-Property-Cmdlets existieren (ab Agent 5.3)
+    $ninjaPropertyAvailable = $null
+    if (-not $script:checkedNinjaPropertySupport) {
+        try {
+            $ninjaPropertyAvailable = Get-Command "Ninja-Property-Get" -ErrorAction SilentlyContinue
+            $script:ninjaPropertySupport = $null -ne $ninjaPropertyAvailable
+        } catch {
+            $script:ninjaPropertySupport = $false
+        }
+        $script:checkedNinjaPropertySupport = $true
+    }
+    
     # Versuch 1: Ninja-Property-Get verwenden (wenn verfügbar)
-    try {
-        $value = Ninja-Property-Get $FieldName -ErrorAction SilentlyContinue
-    } catch {}
+    if ($script:ninjaPropertySupport) {
+        try {
+            $value = Ninja-Property-Get $FieldName -ErrorAction SilentlyContinue
+        } catch {}
+    }
     
     # Versuch 2: CLI verwenden
     if (-not $value) {
@@ -109,13 +92,18 @@ function Get-NinjaCustomField {
         }
     }
     
-    # Wenn als Boolean gewünscht
+    # Wenn als Boolean gewünscht - NUR true/1 als true interpretieren
     if ($AsBoolean -and $value) {
-        return $value -in @('true', 'True', '1', 'yes', 'Yes', 'on', 'On')
+        return $value -match '^(true|1)$'
     }
     
     return $value
 }
+
+# Skriptvariablen initialisieren
+$script:checkedNinjaPropertySupport = $false
+$script:ninjaPropertySupport = $false
+
 
 # Custom Fields auslesen und Parameter ergänzen
 $cf_PrimaryDNS = Get-NinjaCustomField -FieldName "DNS_PrimaryServer"
@@ -161,13 +149,33 @@ if (-not $ResetDHCP -and -not $PrimaryDNS) {
     exit 1
 }
 
+# DNS-Server-Validierung
+if (-not $ResetDHCP) {
+    try {
+        # Primären DNS validieren
+        [void][IPAddress]::Parse($PrimaryDNS)
+        
+        # Sekundären DNS validieren, wenn angegeben
+        if ($SecondaryDNS) {
+            [void][IPAddress]::Parse($SecondaryDNS)
+        }
+    }
+    catch {
+        Write-Error "Ungültige IP-Adresse für DNS-Server: $_"
+        exit 1
+    }
+}
+
 $ErrorActionPreference = "Stop"
 $VerbosePreference     = "Continue"
 
-# Regex zum Unterdrücken virtueller Adapter
-$virtualPattern = 'VMware|Hyper-V|VPN|loopback|Loopback|Tunnel|TAP|Microsoft Wi-Fi Direct|WAN Miniport|Bluetooth|Remote Access|[*]'
+# Regex zum Unterdrücken virtueller Adapter mit case-insensitive Pattern
+$virtualPattern = '(?i)VMware|Hyper-V|VPN|loopback|Tunnel|TAP|Wi-Fi Direct|WAN Miniport|Bluetooth|Remote Access'
 
-# Array mit erlaubten Adaptertypen (nur WLAN und LAN)
+# Regex für erlaubte Adapter-Typen (LAN/WLAN)
+$allowedPattern = '(?i)(Ethernet|LAN|Wi-?Fi|WLAN|802\.11|Wireless)'
+
+# Array mit erlaubten Adaptertypen als Referenz
 $allowedAdapterTypes = @(
     'Ethernet', 'LAN', 'WLAN', 'Wi-Fi', 'Wireless', 'Netzwerkadapter', 'Network Adapter',
     '802.11', 'Realtek', 'Intel', 'Broadcom', 'Atheros', 'Qualcomm', 'TP-Link', 'D-Link',
@@ -186,10 +194,25 @@ function Test-IPv4InSubnet {
         [string]$Cidr    # z. B. 192.168.10.0/24
     )
     try {
+        # IP-Validierung
+        if (-not [System.Net.IPAddress]::TryParse($Ip, [ref]$null)) {
+            return $false
+        }
+        
         [IPAddress]$ipAddr = $Ip
-        $parts  = $Cidr.Split('/')
+        $parts = $Cidr.Split('/')
+        
+        # CIDR-Format validieren
+        if ($parts.Length -ne 2) { return $false }
+        if (-not [System.Net.IPAddress]::TryParse($parts[0], [ref]$null)) {
+            return $false
+        }
+        
         [IPAddress]$netAddr = $parts[0]
-        $prefix = [int]$parts[1]
+        
+        # Präfix validieren (0-32)
+        [int]$prefix = $parts[1]
+        if ($prefix -lt 0 -or $prefix -gt 32) { return $false }
 
         $ipBits   = [BitConverter]::ToUInt32($ipAddr.GetAddressBytes()[::-1],0)
         $netBits  = [BitConverter]::ToUInt32($netAddr.GetAddressBytes()[::-1],0)
@@ -201,100 +224,101 @@ function Test-IPv4InSubnet {
 }
 
 function Get-TargetAdapters {
-
-    $adapters = Get-NetAdapter |
-        Where-Object {
-            ($_.Status -in @('Up','Unknown') -or $_.LinkSpeed -gt 0) -and
-            $_.InterfaceDescription -notmatch $virtualPattern
-        }
-    
-    # Zusätzliche Filterung: Nur LAN und WLAN Adapter berücksichtigen
-    $adapters = $adapters | Where-Object {
-        $adapterDesc = $_.InterfaceDescription
-        $isAllowedType = $false
-        
-        foreach ($type in $allowedAdapterTypes) {
-            if ($adapterDesc -match $type) {
-                $isAllowedType = $true
-                break
-            }
-        }
-        
-        # Prüfung auf Netzwerkkategorien (WLAN oder LAN)
-        $isPhysicalAdapter = $adapterDesc -match 'Ethernet|LAN|Wi-?Fi|WLAN|802\.11|Wireless'
-        
-        # Hardware-ID prüfen für bessere Erkennung
-        $netAdapterHardware = Get-NetAdapterHardwareInfo -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue
-        $isWiFiAdapter = $false
-        if ($netAdapterHardware) {
-            # NDIS-Objekt prüfen ob es sich um WLAN handelt (PnP-ID enthält normalerweise WLAN/WiFi-Hinweise)
-            $isWiFiAdapter = ($netAdapterHardware.PnPDeviceID -match 'PCI\\VEN_.+\\REV_.+\\|USB\\VID_.+\\PID_.+\\') -and
-                             ($netAdapterHardware.PnPDeviceID -match 'WLAN|WiFi|Wireless|802\.11')
-        }
-        
-        return $isAllowedType -or $isPhysicalAdapter -or $isWiFiAdapter
+    # Adapter filtern: Nur aktive Adapter, keine virtuellen Adapter, nur LAN/WLAN
+    $adapters = Get-NetAdapter | Where-Object {
+        ($_.Status -in @('Up','Unknown') -or $_.LinkSpeed -gt 0) -and
+        $_.InterfaceDescription -inotmatch $virtualPattern -and
+        $_.InterfaceDescription -match $allowedPattern
     }
 
-    # Filter 1 – AdapterName (Wildcard)
-    if ($PSBoundParameters.ContainsKey('AdapterName')) {
-        $pattern = ($AdapterName -join '|') -replace '\*','.*'
-        $adapters = $adapters | Where-Object Name -match $pattern
+    # Optional: Hardware-ID prüfung nur für Windows 10 2004+ / Server 2022+
+    if ([Environment]::OSVersion.Version.Build -ge 19041) {
+        $adapters = $adapters | Where-Object {
+            $isWiFiAdapter = $false
+            try {
+                $hw = Get-NetAdapterHardwareInfo -InterfaceIndex $_.InterfaceIndex -ErrorAction Stop
+                if ($hw) {
+                    $isWiFiAdapter = $hw.PnPDeviceID -imatch 'WLAN|WiFi|Wireless|802\.11'
+                }
+            } catch {}
+            # Nur Hardware-Check ergänzen, nicht ersetzen (OR-Bedingung)
+            return $true -or $isWiFiAdapter
+        }
     }
 
-    # Enrich mit IP/Gateway
+    # AdapterName-Filter (Wildcard)
+    if ($AdapterName) {
+        $pattern = ($AdapterName -join '|').Replace('*','.*')
+        $adapters = $adapters | Where-Object { $_.Name -match $pattern }
+    }
+
+    # Anreicherung mit IP/Gateway-Informationen
     $enriched = foreach ($a in $adapters) {
         $cfg = Get-NetIPConfiguration -InterfaceIndex $a.ifIndex
         [PSCustomObject]@{
-            Adapter      = $a
-            IPv4         = ($cfg.IPv4Address.IPAddress)[0]
-            GatewayIPv4  = ($cfg.IPv4DefaultGateway.NextHop)[0]
+            IfIndex = $a.ifIndex
+            Alias   = $a.Name
+            IPv4    = ($cfg.IPv4Address.IPAddress)[0]
+            Gateway = ($cfg.IPv4DefaultGateway.NextHop)[0]
         }
+    } | Where-Object Gateway  # Gateway muss vorhanden sein (Basis-Kriterium)
+
+    # Gateway-Filter 
+    if ($TargetGateway) {
+        $enriched = $enriched | Where-Object { $_.Gateway -eq $TargetGateway }
     }
 
-    # Filter 2 – Default Gateway vorhanden (Basis-Kriterium)
-    $enriched = $enriched | Where-Object { $_.GatewayIPv4 }
-
-    # Filter 3 – TargetGateway
-    if ($PSBoundParameters.ContainsKey('TargetGateway')) {
-        $tg = $TargetGateway
-        $enriched = $enriched | Where-Object { $_.GatewayIPv4 -eq $tg }
-    }
-
-    # Filter 4 – TargetSubnet
-    if ($PSBoundParameters.ContainsKey('TargetSubnet')) {
-        $subnet = $TargetSubnet
-        $enriched = $enriched | Where-Object { Test-IPv4InSubnet $_.IPv4 $subnet }
+    # Subnetz-Filter
+    if ($TargetSubnet) {
+        $enriched = $enriched | Where-Object { Test-IPv4InSubnet $_.IPv4 $TargetSubnet }
     }
 
     return $enriched
 }
 
-function Set-Dns {
+function Set-DnsIPv4 {
     param(
-        [int]$IfIndex,
-        [string[]]$Servers,
+        [int]$Idx,
+        [string[]]$Srv,
         [switch]$Dhcp
     )
     try {
-        if ($Dhcp) {
-            Set-DnsClientServerAddress -InterfaceIndex $IfIndex -ResetServerAddresses -ErrorAction Stop
+        if ($Dhcp) { 
+            Set-DnsClientServerAddress -InterfaceIndex $Idx -ResetServerAddresses -EA Stop 
+        } else { 
+            Set-DnsClientServerAddress -InterfaceIndex $Idx -ServerAddresses $Srv -EA Stop 
         }
-        else {
-            Set-DnsClientServerAddress -InterfaceIndex $IfIndex -ServerAddresses $Servers -ErrorAction Stop
-        }
-    }
-    catch {
-        # Fallback (alte OS)
-        $alias = (Get-NetAdapter -InterfaceIndex $IfIndex).InterfaceAlias
-        if ($Dhcp) {
-            netsh interface ip set dns name="$alias" source=dhcp
+    } catch {
+        # Fallback auf netsh für ältere Betriebssysteme
+        $alias = (Get-NetAdapter -InterfaceIndex $Idx).InterfaceAlias
+        if ($Dhcp) { 
+            netsh interface ip set dns name="$alias" source=dhcp 
         } else {
-            netsh interface ip set dns name="$alias" static $Servers[0] primary
-            if ($Servers.Count -gt 1) {
-                netsh interface ip add dns name="$alias" $Servers[1] index=2
+            netsh interface ip set dns name="$alias" static $Srv[0] primary
+            # Dynamische Indizes für alle weiteren DNS-Server
+            for ($i = 1; $i -lt $Srv.Count; $i++) { 
+                netsh interface ip add dns name="$alias" $Srv[$i] index=($i+1) 
             }
         }
     }
+}
+
+function CF-Update {
+    param([string]$val)
+    $ok = $false
+    
+    try { 
+        Ninja-Property-Set DNS_LastChange "$val"; $ok = $true 
+    } catch { }
+    
+    if (-not $ok) {
+        $cli = 'C:\ProgramData\NinjaRMMAgent\ninjarmm-cli.exe'
+        if (Test-Path $cli) { 
+            & $cli set DNS_LastChange "$val" 
+            if (-not $LASTEXITCODE) { $ok = $true }
+        }
+    }
+    return $ok
 }
 
 function Format-Output {
@@ -309,6 +333,10 @@ function Format-Output {
 #region 3 – Ermitteln & Ändern
 #--------------------------------------------------
 
+# Zähler für Änderungen initialisieren
+$changed = 0
+$skipped = 0
+
 $targets = Get-TargetAdapters
 if (-not $targets) {
     Write-Error "Kein Adapter erfüllt die Selektionskriterien (Gateway/Subnetz/Name)."
@@ -317,8 +345,8 @@ if (-not $targets) {
 
 $servers = @()
 if (-not $ResetDHCP) {
-    $servers += $PrimaryDNS
-    if ($SecondaryDNS) { $servers += $SecondaryDNS }
+    # DNS-Duplikate entfernen
+    $servers = @($PrimaryDNS, $SecondaryDNS) | Where-Object { $_ } | Select-Object -Unique
 }
 
 $log = [System.Text.StringBuilder]::new()
@@ -329,12 +357,33 @@ foreach ($entry in $targets) {
     $old   = (Get-DnsClientServerAddress -InterfaceIndex $ifIdx -AddressFamily IPv4).ServerAddresses -join ','
 
     $action = if ($ResetDHCP) { 'DHCP aktiviert' } else { "DNS → $($servers -join ',')" }
+    
+    # Prüfen, ob sich Einstellung wirklich ändert
+    $new = if ($ResetDHCP) { "DHCP" } else { $servers -join ',' }
+    if ($old -eq $new) { 
+        Write-Warning "[$alias] DNS-Einstellungen unverändert"
+        $skipped++
+        continue
+    }
 
     if ($PSCmdlet.ShouldProcess($alias, $action)) {
+        # DNS-Einstellungen anwenden
         Set-Dns -IfIndex $ifIdx -Servers $servers -Dhcp:$ResetDHCP
-        [void]$log.AppendLine("[$alias] $action (alt: $old)  GW:$($entry.GatewayIPv4)")
+        
+        # Detailliertere Log-Information
+        $logEntry = "[$alias] $action (alt: $old)"
+        if ($entry.GatewayIPv4) {
+            $logEntry += "  GW:$($entry.GatewayIPv4)"
+        }
+        [void]$log.AppendLine($logEntry)
         Write-Verbose "[$alias] $action"
+        $changed++
     }
+}
+
+# Anderen Exit-Code verwenden wenn keine Änderung erfolgte
+if ($changed -eq 0 -and $skipped -gt 0) {
+    exit 2  # No Change
 }
 
 ipconfig /flushdns | Out-Null
@@ -351,23 +400,58 @@ if (-not $NoCustomField) {
         $newValue  = if ($ResetDHCP) { "DHCP aktiviert $timestamp" }
                      else { "$($servers -join ', ') | $timestamp" }
 
-        Ninja-Property-Set DNS_LastChange "$newValue"
+        # Beide Methoden versuchen
+        $updateSuccess = $false
+        
+        try {
+            Ninja-Property-Set DNS_LastChange "$newValue"
+            $updateSuccess = $true
+        } catch {
+            Write-Verbose "Ninja-Property-Set fehlgeschlagen: $_"
+        }
 
         $cli = 'C:\ProgramData\NinjaRMMAgent\ninjarmm-cli.exe'
-        if (Test-Path $cli) { & $cli set DNS_LastChange "$newValue" }
+        if (-not $updateSuccess -and (Test-Path $cli)) { 
+            $cliResult = & $cli set DNS_LastChange "$newValue" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $updateSuccess = $true
+            }
+        }
 
-        Write-Output "Custom Field 'DNS_LastChange' aktualisiert."
+        if ($updateSuccess) {
+            Write-Output "Custom Field 'DNS_LastChange' aktualisiert."
+        } else {
+            Write-Error "Custom-Field-Update fehlgeschlagen"
+            # Exitcode 3 (soft fail) für diesen speziellen Fall
+            if ($changed -gt 0) { exit 3 }
+        }
     }
     catch {
-        Write-Warning "Custom-Field-Update fehlgeschlagen: $_"
+        Write-Error "Custom-Field-Update fehlgeschlagen: $_"
+        if ($changed -gt 0) { exit 3 }
     }
 }
 
 #--------------------------------------------------
-#endregion
 #region 5 – Fertig
 #--------------------------------------------------
-Write-Host "DNS-Einstellungen erfolgreich geändert."
-exit 0
+# Zusammenfassung der Ausführung erstellen
+$summary = [System.Text.StringBuilder]::new()
+[void]$summary.AppendLine("Zusammenfassung der Ausführung:")
+[void]$summary.AppendLine("- Geänderte Adapter: $changed")
+[void]$summary.AppendLine("- Unveränderte Adapter: $skipped")
+
+Write-Output $summary.ToString()
+
+if ($changed -gt 0) {
+    Write-Host "DNS-Einstellungen erfolgreich geändert."
+    exit 0  # Changed
+} elseif ($skipped -gt 0) {
+    Write-Host "Keine DNS-Einstellungen geändert, da bereits korrekt konfiguriert."
+    exit 2  # No Change
+} else {
+    Write-Error "Keine passenden Adapter gefunden."
+    exit 1  # Error
+}
 #--------------------------------------------------
 #endregion
