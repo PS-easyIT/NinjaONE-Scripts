@@ -1,4 +1,4 @@
-### NinjaOne bringt (Stand Frühjahr 2025) keinen „fertigen" Bericht mit, der systemübergreifend alle auf den Endpunkten konfigurierten DNS-Server sammelt und in einem Dashboard/Report anzeigt.
+### NinjaOne bringt (Frühjahr 2025) keinen „fertigen" Bericht mit, der systemübergreifend alle auf den Endpunkten konfigurierten DNS-Server sammelt und in einem Dashboard/Report anzeigt.
 
 **NinjaOne Integration Guide**
 * https://github.com/PS-easyIT/NinjaONE-Scripts/blob/main/05%20-%20DNS%20Settings/NinjaRMM-Guide_ENG.md
