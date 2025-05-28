@@ -1,5 +1,15 @@
+# Integration Guide (English) – DNS Scripts for NinjaOne
 
-# Integration Guide – DNS Client Scripts in NinjaOne
+> Version 1.0 – May 28, 2025  
+> Author: Andreas Hepp
+
+## Prerequisites  
+| Component | Minimum Version |
+|-----------|-----------------|
+| **NinjaOne Agent** | 5.3 (for `Ninja-Property-Set/Get`) |
+| **Windows** | 10/11 or Server 2012 R2 + |
+| **PowerShell** | 5.1 |
+
 
 ## 1  Create Custom Fields
 
