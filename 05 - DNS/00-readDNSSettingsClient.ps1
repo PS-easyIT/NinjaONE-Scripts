@@ -31,7 +31,7 @@ param(
     [switch]$NoCustomField,
     
     [Parameter(Mandatory = $false)]
-    [int]$LogRetentionDays = 30
+    [object]$LogRetentionDays = 30
 )
 
 #requires -Version 5.1
@@ -40,6 +40,11 @@ param(
 # Sicherstellen, dass Fehler und Verbose ausgegeben werden
 $ErrorActionPreference = "Continue"
 $VerbosePreference = "Continue"
+
+# Parameter-Validierung und Konvertierung
+if ($LogRetentionDays -isnot [int]) {
+    $LogRetentionDays = 30
+}
 
 # Optional Logging aktivieren - im gleichen Verzeichnis wie das Set-Skript
 $logDir = "$env:ProgramData\NinjaRMMAgent\Logs"
@@ -436,48 +441,48 @@ else {
 #endregion
 
 #region Custom-Field-Update
-# === Ergebnis in Ninja-Custom-Field schreiben =========================
+# === Custom-Field-Update für DNS_Summary mit DNS-Server-Adressen =========
 if (-not $NoCustomField) {
     try {
-        # Im Custom Field nur die reinen DNS-Server als kommagetrennte Liste anzeigen
-        $fieldValue = $customFieldDnsServers -join ", "
+        # Liste für alle gefundenen DNS-Server
+        $dnsServerList = [System.Collections.ArrayList]@()
         
-        # Falls keine DNS-Server gefunden wurden
-        if ([string]::IsNullOrWhiteSpace($fieldValue)) {
-            $fieldValue = "Keine DNS-Server gefunden"
-        }
-        
-        # Custom-Field-Grenze beachten (etwa 2 kB für Multi-Line-Felder)
-        if ($fieldValue.Length -gt 1900) {
-            $fieldValue = $fieldValue.Substring(0, 1850) + " [...gekürzt, siehe CSV-Report]"
-        }
-        
-        # Prüfen, ob Ninja-Property-Set verfügbar ist
-        if (Get-Command Ninja-Property-Set -EA SilentlyContinue) {
-            # DNS Summary aktualisieren
-            Ninja-Property-Set DNS_Summary "$fieldValue"
-            
-            # DNS_Mismatch boolean Custom Field setzen (als String 'true' oder 'false')
-            Ninja-Property-Set DNS_Mismatch ($hasDnsMismatch.ToString().ToLower())
-            
-            Write-Verbose "Property-Cmdlet erfolgreich verwendet"
-        } else {
-            # Fallback: CLI verwenden wenn Property-Cmdlet nicht verfügbar
-            Write-Verbose "Property-Cmdlet nicht vorhanden – CLI-Fallback"
-            $cli = 'C:\ProgramData\NinjaRMMAgent\ninjarmm-cli.exe'
-            if (Test-Path -Path $cli) {
-                & $cli set DNS_Summary "$fieldValue"
-                & $cli set DNS_Mismatch "$($hasDnsMismatch.ToString().ToLower())"
-                Write-Verbose "CLI-Fallback erfolgreich verwendet"
-            } else {
-                Write-Warning "Weder Property-Cmdlet noch CLI verfügbar - Custom Fields konnten nicht aktualisiert werden"
+        # Über alle Adapter iterieren und ihre DNS-Server sammeln
+        foreach ($adapter in $dnsReport) {
+            # Für jeden Adapter über die DNS-Server-Einträge iterieren
+            foreach ($dnsInfo in $adapter.DNSServers) {
+                # Nur IPv4 DNS-Server berücksichtigen
+                if ($dnsInfo.AddressFamily -eq "IPv4") {
+                    $servers = $dnsInfo.ServerAddresses
+                    if ($servers -and $servers -ne "(Keine)") {
+                        # Einzelne Server extrahieren (falls mehrere durch Komma getrennt sind)
+                        $serverArray = $servers -split "[,;]" | ForEach-Object { $_.Trim() }
+                        foreach ($server in $serverArray) {
+                            if ($server -and $server -ne "(Keine)" -and $server -notmatch "^$") {
+                                $null = $dnsServerList.Add($server)
+                            }
+                        }
+                    }
+                }
             }
         }
         
-        Write-Output "Custom Field 'DNS_Summary' aktualisiert"
+        # Duplikate entfernen
+        $uniqueDnsServers = $dnsServerList | Select-Object -Unique
+        
+        # Kommagetrennter String mit den DNS-Servern
+        $fieldValue = if ($uniqueDnsServers.Count) {
+            $uniqueDnsServers -join ", "
+        } else {
+            "Keine DNS-Server gefunden"
+        }
+
+        # Custom Field DNS_Summary aktualisieren
+        Ninja-Property-Set DNS_Summary "$fieldValue"
+        Write-Verbose "Custom Field 'DNS_Summary' erfolgreich mit DNS-Server-Adressen befüllt"
     }
     catch {
-        Write-Warning "Custom-Field-Update fehlgeschlagen: $_"
+        Write-Warning "Custom-Field-Update für 'DNS_Summary' fehlgeschlagen: $_"
     }
 }
 else {
@@ -487,7 +492,7 @@ else {
 # Transcript beenden
 Stop-Transcript -ErrorAction SilentlyContinue
 #endregion
-
+ 
 #region Abschluss
 Write-Verbose "Skriptausführung erfolgreich abgeschlossen."
 Write-Host "DNS-Bericht erfolgreich erstellt." 

@@ -28,16 +28,29 @@
 
 **Hinweis:** Werden Custom‑Fields nicht angelegt, funktionieren die Skripte trotzdem, nur werden keine Werte übernommen bzw. geschrieben.
 
+**Anlegen des Custom Field „DNS_Summary“**
+-    Melden Sie sich in der NinjaOne-Konsole an.
+-    Navigieren Sie zu Einstellungen (Zahnradsymbol) → Endpoint Management → Benutzerdefinierte Felder.
+-    Wählen Sie Global 
+-    Klicken Sie auf Benutzerdefiniertes Feld hinzufügen.
+-    Feldname: DNS_Summary
+-    Anzeigename: DNS_Summary
+-    Feldtyp: Mehrzeiliger Text (Text / Multi-Line)
+--   Sichtbarkeit: Aktivieren Sie „Skriptzugriff“, damit Ihr PowerShell-Skript das Feld beschreiben kann
+-    Auf Speichern klicken.
+
 ---
 
 ## 3  Skripte importieren
 
-1. _Administration → Skripte → Neues Skript_  
-2. Dateityp: **PowerShell**, Ausführen als **SYSTEM**  
-3. **setDNSSettingsClient.ps1** hochladen  
-   * Empfehlung: Parameter *leer* lassen → Steuerung via Custom‑Fields  
-4. **readDNSSettingsClient.ps1** hochladen  
-   * optional `-NoCSV` bzw. `-NoCustomField` vorbelegen
+**Import des PowerShell-Skripts**
+- Klicken Sie auf Neues Skript -> Script importieren.
+-- Name: readDNSSettingsClient
+-- Beschreibung: Liest DNS-Server-IPs aus und speichert sie in DNS_Summary.
+-- Typ: PowerShell
+
+**Überprüfung**
+- Nach dem nächsten Agent-Check-In erscheint im Geräte-Detailfenster unter Benutzerdefinierte Felder das Feld DNS_Summary mit den ausgelesenen DNS-Server-IP-Adressen.
 
 ---
 
